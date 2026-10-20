@@ -1,25 +1,13 @@
 ## Summary
 
-RevoraContracts dispute-hardening PR: prevent low-share holder griefing and remove the issuer-next-to-frozen-offering from being the single point of truth for lifting a Critical freeze.
-
-- Holders can still open on-chain disputes and attach off-chain evidence via `open_dispute`, but `open_dispute` now accepts `Standard` severity only. Reaching `Critical` requires an explicit `escalate_dispute` call by the contract admin.
-- `resolve_dispute` authorization is now split by severity: the contract admin can resolve any dispute, while the offering issuer can resolve only non-Critical disputes. An issuer under a Critical dispute can no longer unilaterally clear the freeze.
-- Critical freezes are now time-bounded: a per-offering `CriticalFreezeWindowSecs` (default `DEFAULT_DISPUTE_WINDOW_SECS`, configurable via `set_critical_dispute_window`) bounds how long a holder-opened critical freeze can remain active before auto-expiring. The window is measured from `opened_at`, and `is_dispute_freeze_active` returns `false` once the window elapses unless admin renews/escalates.
-- Standard disputes and issuer-initiated disputes keep their existing behavior, with full doc comments, new public entrypoints/query methods, new storage keys, and a new audit event.
+- Prevent griefing: holders can no longer open `Critical` disputes directly. `open_dispute` now accepts `Standard` severity only; reaching `Critical` requires an explicit `escalate_dispute` call by the contract admin (or safety role).
+- Break the conflict-of-interest resolution path: `resolve_dispute` now permits the contract admin to resolve **any** dispute, while the offering issuer is restricted to resolving **non-critical** disputes only. A critical dispute can no longer be unilaterally cleared by the disputed issuer.
+- Bound the freeze window: a per-offering `CriticalFreezeWindowSecs` (defaults to `DEFAULT_DISPUTE_WINDOW_SECS`, configurable via `set_critical_dispute_window`) governs how long a holder-opened critical freeze can remain active before auto-expiring. The window is measured from `opened_at`, and `is_dispute_freeze_active` returns `false` once the window elapses unless the admin renews/escalates.
+- Add new public entrypoints and query methods with full doc comments, locker stubs, and storage keys; keep existing behavior for Standard disputes and issuer disputes unchanged.
 
 Closes #1328
 
-## Why this PR exists
-
-### Previous entrypoint behavior
-
-| Entrypoint | Prior authorization | Prior freeze effect |
-|---|---|---|
-| `open_dispute` | `holder.require_auth()` + `share > 0` | `Critical` severity immediately incremented `CriticalDisputeCount` and could freeze claims for the offering. |
-| `resolve_dispute` | `caller == dispute.offering_id.issuer` | Only the disputed issuer could resolve any open dispute, including Critical ones. |
-| `is_dispute_freeze_active` | read-only | Returned `true` whenever `CriticalDisputeCount > 0`, with no expiry or renewal guard. |
-
-### Why that was dangerous
+## Why
 
 - `open_dispute` previously required only `holder.require_auth()` and `share > 0`, and directly incremented `CriticalDisputeCount` when `severity == Critical`. Any dust holder could freeze an entire offering indefinitely.
 - `resolve_dispute` previously enforced `caller == dispute.offering_id.issuer`, so the disputed issuer was the only party able to lift the freeze — a direct conflict of interest with no admin override.
@@ -58,16 +46,6 @@ Closes #1328
 - Added `DataKey3::CriticalDisputeWindowSecs(OfferingId)` entry (u64, offering-scoped).
 - Updated schema + JSON to include the new key and events for auditability.
 
-### Affected files
-
-| File | Change |
-|---|---|
-| `src/lib.rs` | `open_dispute` severity gate, new `escalate_dispute`, new `resolve_dispute` auth split, time-bounded `is_dispute_freeze_active`, new window getter/setter, new errors, new event, doc comments. |
-| `src/test_dispute.rs` | Extended client usage and new acceptance tests for the new dispute model. |
-| `src/test_dispute_freeze_window.rs` | New suite for freeze-window expiry and window configuration behavior. |
-| `tools/storage_layout_schema.rs` | New storage key entry. |
-| `docs/STORAGE_LAYOUT.json` | Generated layout updated to include the new key and events. |
-
 ## Testing
 
 ### CI (local)
@@ -88,7 +66,7 @@ cargo test --lib freeze
 cargo test --lib claim
 ```
 
-### Anchor checks
+### Acceptance criteria (covered by tests)
 
 - [x] Test: holder-opened critical dispute without admin confirmation does not block claim.
 - [x] Test: admin-escalated dispute blocks claim; admin resolution lifts it.
@@ -113,5 +91,3 @@ cargo test --lib claim
 - The freeze-window check uses `opened_at` of the oldest still-open critical dispute for the offering. This is a simple, deterministic bound that does not depend on period close timing for holder-opened disputes.
 - If an offering has no closed period and no admin escalation, `is_dispute_freeze_active` is `false` — consistent with the existing “no deadline, no freeze” posture for dispute-window checks.
 - If you want the safety role to be distinct from admin, the escalation entrypoint already uses `require_admin`; we can parameterize the role later without changing the security model.
-
-Closes #1328
